@@ -246,8 +246,8 @@ class Agent:
         states = numpy.array([o[0] for o in batch])
         states_ = numpy.array([(no_state if o[3] is None else o[3]) for o in batch])
 
-        p = agent.brain.predict(states)
-        p_ = agent.brain.predict(states_, target=True)
+        p = self.brain.predict(states)
+        p_ = self.brain.predict(states_, target=True)
 
         x = numpy.zeros((batch_len, self.state_count))
         y = numpy.zeros((batch_len, self.action_count))
@@ -386,29 +386,33 @@ class Environment:
 
 
 # -------------------- MAIN ----------------------------
-env = Environment(gym.make(GYM_ENV))
+def main():
+    env = Environment(gym.make(GYM_ENV))
 
-state_count = env.gym_env.observation_space.shape[0]
-action_count = env.gym_env.action_space.n
-observation_space = env.gym_env.observation_space
+    state_count = env.gym_env.observation_space.shape[0]
+    action_count = env.gym_env.action_space.n
+    observation_space = env.gym_env.observation_space
 
-agent = Agent(state_count, action_count, observation_space)
-random_agent = RandomAgent(action_count)
+    agent = Agent(state_count, action_count, observation_space)
+    random_agent = RandomAgent(action_count)
 
-try:
-    if MEMORY_CAPACITY_RANDOM > 0:
-        print("Initialize memory with samples from random agent...")
-        while not random_agent.memory.is_full(random=True):
-            env.run_random(random_agent)
-        print("Initilization completed, %d successful episodes." % random_agent.successes)
+    try:
+        if MEMORY_CAPACITY_RANDOM > 0:
+            print("Initialize memory with samples from random agent...")
+            while not random_agent.memory.is_full(random=True):
+                env.run_random(random_agent)
+            print("Initilization completed, %d successful episodes." % random_agent.successes)
 
-    agent.memory = random_agent.memory
-    random_agent = None
+        agent.memory = random_agent.memory
+        random_agent = None
 
-    while True:
-        env.run(agent)
-finally:
-    if SAVE_BRAIN:
-        agent.brain.model.save(FILENAME_SAVE_BRAIN)
-    if SAVE_MEMORY:
-        agent.memory.save(FILENAME_SAVE_MEMORY)
+        while True:
+            env.run(agent)
+    finally:
+        if SAVE_BRAIN:
+            agent.brain.model.save(FILENAME_SAVE_BRAIN)
+        if SAVE_MEMORY:
+            agent.memory.save(FILENAME_SAVE_MEMORY)
+
+if __name__ == "__main__":
+    main()
