@@ -4,15 +4,16 @@ We use a feedforward neural network with two fully-connected hidden layers
 that consist of 128 neurons each. The model is trained via experience replay
 by sampling randomly from the memory. The target Q function is given by
 a second neural network with identical properties, whose weights are regularly
-updated by the main model. The mean reward after training is -99.
+updated by the main model. The mean reward after training is around -100.
 
 To speed up the learning, we initially fill the memory by taking random
 actions. This gives the agent information about the position of the goal.
+We also normalize the state variables to the interval [-1,1].
 
 Due to the two-dimensional state space (position and velocity), we can
 visualize the neural network while it learns. We do this by discretizing
-the state space and plotting the prediction of our model for max_a Q(s,a)
-as well as for the greedy policy argmax_a Q(s,a).
+the state space and plotting the prediction of our model for the value
+function max_a Q(s,a) as well as for the greedy policy argmax_a Q(s,a).
 """
 
 import random
@@ -37,8 +38,8 @@ MEMORY_CAPACITY_RANDOM = 2e5  # Number of samples from random agent to initializ
 BATCH_SIZE = 32  # Batch size for memory replay and for model training
 
 GAMMA = 0.99  # Discount rate
-LEARNING_RATE = 0.0001
-UPDATE_TARGET_FREQUENCY = 1000  # Step rate for copying weights from the active model to the target model
+LEARNING_RATE = 0.00025
+UPDATE_TARGET_FREQUENCY = 1000  # Step rate for copying weights from the main model to the target model
 
 MAX_EPSILON = 0.1  # Initial probability for random decision of the agent
 MIN_EPSILON = 0.01  # Asymptotic probability for random decision of the agent
@@ -62,20 +63,22 @@ SAVE_BRAIN = False
 FILENAME_SAVE_BRAIN = "_brain_mountaincar.h5"
 
 # ------------------- PLOT UTILITIES -------------------
-def map_brain(brain, observation_space, res=RES):
-    """
-    Calculate the preciditions of the neural network for the discretized state space
+def map_brain(brain, res=RES):
+    """Calculates the preciditions of the neural network for the discretized state space.
 
-    :param brain: Neural network
-    :param observation_space: Observation space of the OpenAI Gym environment
-    :param res: Resolution for state space discretization
-    :returns: Numpy arrays for max_a Q(s,a) and for argmax_a Q(s,a)
+    Args:
+        brain: Implementation of the neural network.
+        res: Resolution per variable for state space discretization.
+
+    Returns:
+        Numpy arrays for max_a Q(s,a) and for argmax_a Q(s,a) on the discretized state space.
     """
     s = numpy.zeros((res * res, 2))
     i = 0
 
-    low = observation_space.low
-    high = observation_space.high
+    # we have normalized the states in the environment
+    low = [-1,-1]
+    high = [1,1]
 
     for i1 in range(res):
         for i2 in range(res):
@@ -89,12 +92,13 @@ def map_brain(brain, observation_space, res=RES):
     return map_v, map_a
 
 def initialize_plot(observation_space, res=RES):
-    """
-    Create two subplots for later visualization of the neural network predictions
+    """Creates two subplots for later visualization of the neural network predictions.
 
-    :param observation_space: Observation space of the OpenAI Gym environment
-    :param res: Resolution for state space discretization
-    :returns: Two imshow objects for max_a Q(s,a) and for argmax_a Q(s,a)
+    Args:
+        observation_space: Observation space of the OpenAI Gym environment.
+        res: Resolution per variable for state space discretization.
+    Returns:
+        Two imshow objects for max_a Q(s,a) and for argmax_a Q(s,a).
     """
     low = observation_space.low
     high = observation_space.high
@@ -118,7 +122,7 @@ def initialize_plot(observation_space, res=RES):
     norm = colors.BoundaryNorm(bounds, cmap.N)
 
     plot2 = plt.imshow(numpy.random.rand(res,res), origin='lower', cmap=cmap, norm=norm)
-    plt.title("greedy policy")
+    plt.title("argmax_a Q(s,a)")
     plt.xlabel("position")
     plt.xticks(range(0,res+1,int(res/4)),numpy.around(numpy.linspace(low[0],high[0],num=5), decimals=2))
     plt.ylabel("velocity")
@@ -132,25 +136,32 @@ def initialize_plot(observation_space, res=RES):
 
 # -------------------- BRAIN ---------------------------
 class Brain:
-    """Implementation of the neural network"""
+    """Implementation of the main and the target neural network.
+    
+    Args:
+        state_count: Number of state variables.
+        action_count: Number of possible actions.
+    """
 
     def __init__(self, state_count, action_count):
-        self.state_count = state_count
-        self.action_count = action_count
+        """Initializes the main and the target neural network."""
+        self._state_count = state_count
+        self._action_count = action_count
 
-        self.model = self._create_model()
-        self.model_ = self._create_model()
+        self._model = self._create_model()
+        self._target_model = self._create_model()
 
         if LOAD_BRAIN:
-            self.model.load_weights(FILENAME_LOAD_BRAIN)
-            self.model_.load_weights(FILENAME_LOAD_BRAIN)
+            self._model.load_weights(FILENAME_LOAD_BRAIN)
+            self._target_model.load_weights(FILENAME_LOAD_BRAIN)
 
     def _create_model(self):
+        """Creates a feedforward neural network with Keras."""
         model = Sequential()
 
-        model.add(Dense(units=128, input_dim=self.state_count, activation='relu', name='dense_1'))
+        model.add(Dense(units=128, input_dim=self._state_count, activation='relu', name='dense_1'))
         model.add(Dense(units=128, activation='relu', name='dense_2'))
-        model.add(Dense(units=self.action_count, activation='linear', name='dense_out'))
+        model.add(Dense(units=self._action_count, activation='linear', name='dense_out'))
 
         opt = RMSprop(lr=LEARNING_RATE)
         model.compile(loss='mse', optimizer=opt)
@@ -158,64 +169,128 @@ class Brain:
         return model
 
     def train(self, x, y, epoch=1, verbose=0):
-        self.model.fit(x, y, batch_size=BATCH_SIZE, epochs=epoch, verbose=verbose)
+        """Trains the neural network.
+
+        Args:
+            x: Array of states that are used as input variables.
+            y: Array of the target function Q(s,a) for the states s and
+                all possible actions a.
+            epoch: Number of epochs to use for training.
+            verbose: Set verbosity of the fitting function.
+        """
+        self._model.fit(x, y, batch_size=BATCH_SIZE, epochs=epoch, verbose=verbose)
 
     def predict(self, s, target=False):
+        """Returns a prediction of Q(s,a) for a given set of states s and all possible actions a.
+
+        Args:
+            s: Array of states.
+            target: Whether to use the target network for the prediction.
+        """
         if target:
-            return self.model_.predict(s)
+            return self._target_model.predict(s)
         else:
-            return self.model.predict(s)
+            return self._model.predict(s)
 
     def predict_single(self, s, target=False):
-        return self.predict(s.reshape(1, self.state_count), target=target).flatten()
+        """Returns a prediction of Q(s,a) for a single state s and all possible actions a.
+
+        Args:
+            s: Single state.
+            target: Whether to use the target network for the prediction.
+        """
+        return self.predict(s.reshape(1, self._state_count), target=target).flatten()
 
     def update_target_model(self):
-        self.model_.set_weights(self.model.get_weights())
+        """Copies the weights of the main neural network to the target network."""
+        self._target_model.set_weights(self._model.get_weights())
+
+    def save(self, filename):
+        """Saves the weights of the neural network to a file."""
+        self._model.save(filename)
 
 
 # -------------------- MEMORY --------------------------
 class Memory:
-    """Stores previous experiences of the agent"""
+    """Stores previous experiences of the agent.
+    
+    Args:
+        capacity: Maximum number of experiences that can be saved.
+    """
 
     def __init__(self, capacity):
-        self.samples = []
-        self.capacity = capacity
+        """Initializes the memory."""
+        self._samples = []
+        self._capacity = capacity
         if LOAD_MEMORY:
-            self.samples = self.load(FILENAME_LOAD_MEMORY)
+            self._samples = self.load(FILENAME_LOAD_MEMORY)
 
     def add(self, sample):
-        self.samples.append(sample)
+        """Adds an experience to the memory.
 
-        if len(self.samples) > self.capacity:
-            self.samples.pop(0)
+        Args:
+            sample: Single experience in the format (old_state, action, reward, new_state).
+        """
+        self._samples.append(sample)
+        if len(self._samples) > self._capacity:
+            self._samples.pop(0)
 
     def sample(self, n):
-        n = min(n, len(self.samples))
-        return random.sample(self.samples, n)
+        """Randomly sample experiences from the memory.
+
+        Args:
+            n: Number of experiences to sample.
+        
+        Returns:
+            A list of experiences, which in turn are lists in the format (old_state, action, reward, new_state).
+        """
+        n = min(n, len(self._samples))
+        return random.sample(self._samples, n)
 
     def is_full(self, random=False):
+        """Checks whether the memory is full.
+
+        Args:
+            random: Whether to consider the maximum memory size for the random agent.
+        """
         if random:
-            return len(self.samples) >= MEMORY_CAPACITY_RANDOM
+            return len(self._samples) >= MEMORY_CAPACITY_RANDOM
         else:
-            return len(self.samples) >= self.capacity
+            return len(self._samples) >= self._capacity
+    
+    def size(self):
+        """Returns the number of experiences in the memory."""
+        return len(self._samples)
 
     def load(self, filename):
+        """Loads the memory from a file.
+
+        Returns:
+            List of experiences.
+        """
         with open(filename, 'rb') as fp:
             return pickle.load(fp)
 
     def save(self, filename):
+        """Saves the memory to a file."""
         with open(filename, 'wb') as fp:
-            pickle.dump(self.samples, fp)
+            pickle.dump(self._samples, fp)
 
 
 # -------------------- AGENT ---------------------------
 class Agent:
-    """Interacts with the environment and uses the feedback to train its neural network"""
+    """Interacts with the environment and uses the feedback to train its neural network.
+    
+    Args:
+        state_count: Number of state variables.
+        action_count: Number of possible actions.
+        observation_space: Observation space of the OpenAI Gym environment.
+    """
 
     def __init__(self, state_count, action_count, observation_space):
+        """Initializes the agent."""
         self.state_count = state_count
         self.action_count = action_count
-        self.observation_space = observation_space
 
         self.memory = Memory(MEMORY_CAPACITY)
         self.steps = 0
@@ -225,6 +300,11 @@ class Agent:
         self.plot1, self.plot2 = initialize_plot(observation_space)
 
     def act(self, s):
+        """Returns an action based on the current state and the epsilon-greedy policy.
+
+        Args:
+            s: Current state.
+        """
         self.epsilon = MIN_EPSILON + (MAX_EPSILON - MIN_EPSILON) * math.exp(-LAMBDA * self.steps)
         if random.random() < self.epsilon:
             return random.randint(0, self.action_count - 1)
@@ -232,9 +312,11 @@ class Agent:
             return numpy.argmax(self.brain.predict_single(s))
 
     def observe(self, sample):
+        """Adds an experience to the memory."""
         self.memory.add(sample)
 
     def replay(self):
+        """Trains the neural network with a mini-batch that is randomly sampled from the memory."""
         if self.steps % UPDATE_TARGET_FREQUENCY == 0:
             self.brain.update_target_model()
 
@@ -271,9 +353,14 @@ class Agent:
         self.brain.train(x, y)
 
     def display_brain(self, res=RES):
-        """Plot predictions of the neural network on the discretized state space for max_a Q(s,a) and for argmax_a Q(s,a)"""
+        """Plots predictions of the neural network on the discretized state space
+        for the value function max_a Q(s,a) and the greedy policy argmax_a Q(s,a).
+        
+        Args:
+            res: Resolution per variable for state space discretization.
+        """
         if self.steps % UPDATE_PLOT_FREQUENCY == 0:
-            map_v, map_a = map_brain(self.brain, self.observation_space, res)
+            map_v, map_a = map_brain(self.brain, res)
 
             self.plot1.set_data(map_v.T)
             self.plot1.autoscale()
@@ -283,36 +370,63 @@ class Agent:
 
 
 class RandomAgent:
-    """Interacts with the environment in a random fashion to generate memory samples"""
+    """Interacts with the environment in a random fashion to generate memory samples.
+    
+    Args:
+        action_count: Number of possible actions.
+    """
 
     def __init__(self, action_count):
+        """Initializes the random agent."""
         self.action_count = action_count
         self.memory = Memory(MEMORY_CAPACITY)  # Full capacity since we later copy the memory to the agent
         self.steps = 0
         self.successes = 0
 
     def act(self, s):
+        """Returns a random action.
+
+        Args:
+            s: Current state.
+        """
         return random.randint(0, self.action_count - 1)
 
     def observe(self, sample):
+        """Adds an experience to the memory."""
         self.memory.add(sample)
-
-    def replay(self):
-        pass
 
 
 # -------------------- ENVIRONMENT ---------------------
 class Environment:
-    """Controls the OpenAI Gym environment and interacts with the agent"""
+    """Controls the OpenAI Gym environment and interacts with the agent.
+    
+    Args:
+        gym_env: OpenAI Gym environment.
+    """
 
     def __init__(self, gym_env):
+        """Initializes the environment."""
         self.gym_env = gym_env
         self.episodes = 0
         self.last_scores = []  # For running mean reward
 
+        low = gym_env.observation_space.low
+        high = gym_env.observation_space.high
+        self.mean = (high + low) / 2
+        self.spread = abs(high - low) / 2
+
+    def _normalize(self, s):
+        """Normalizes the state variables to the interval [-1,1]."""
+        return (s - self.mean) / self.spread
+
     def run(self, agent):
-        """Run a single episode with deep Q-learning agent"""
+        """Runs a single episode with deep Q-learning agent.
+        
+        Args:
+            agent: Instance of Agent.
+        """
         s = self.gym_env.reset()
+        s = self._normalize(s)
         r_acc = 0
 
         while True:
@@ -322,6 +436,7 @@ class Environment:
             a = agent.act(s)
 
             s_, r, done, _ = self.gym_env.step(a)
+            s_ = self._normalize(s_)
 
             if done:
                 s_ = None
@@ -340,25 +455,28 @@ class Environment:
             if done:
                 break
 
+        # Calculate running mean reward
         self.last_scores.append(r_acc)
         if len(self.last_scores) > 100:
             self.last_scores.pop(0)
-        mean = sum(self.last_scores) / len(self.last_scores)
-
-        memory_len = len(agent.memory.samples)
+        running_mean = sum(self.last_scores) / len(self.last_scores)
 
         if self.episodes < 100:
             print('Reward: %d, steps: %d, incomplete mean: %d, memory: %d'
-                % (r_acc, agent.steps, mean, memory_len))
+                % (r_acc, agent.steps, running_mean, agent.memory.size()))
         else:
             print('Reward: %d, steps: %d, mean: %d, memory: %d'
-                    % (r_acc, agent.steps, mean, memory_len))
+                    % (r_acc, agent.steps, running_mean, agent.memory.size()))
 
         self.episodes += 1
 
     def run_random(self, random_agent):
-        """Run a single episode with randomly-acting agent"""
+        """Runs a single episode with randomly-acting agent.
+        
+        Args:
+            random_agent: Instance of RandomAgent."""
         s = self.gym_env.reset()
+        s = self._normalize(s)
         a = random_agent.act(s)
         r_acc = 0
 
@@ -367,7 +485,7 @@ class Environment:
                 a = random_agent.act(s)
 
             s_, r, done, _ = self.gym_env.step(a)
-            
+            s_ = self._normalize(s_)
 
             if done:
                 s_ = None
@@ -387,6 +505,7 @@ class Environment:
 
 # -------------------- MAIN ----------------------------
 def main():
+    """Initializes and runs the OpenAI Gym environment."""
     env = Environment(gym.make(GYM_ENV))
 
     state_count = env.gym_env.observation_space.shape[0]
@@ -410,7 +529,7 @@ def main():
             env.run(agent)
     finally:
         if SAVE_BRAIN:
-            agent.brain.model.save(FILENAME_SAVE_BRAIN)
+            agent.brain.save(FILENAME_SAVE_BRAIN)
         if SAVE_MEMORY:
             agent.memory.save(FILENAME_SAVE_MEMORY)
 
